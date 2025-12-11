@@ -144,22 +144,39 @@ const generateToken = async (req, res, next) => {
 
 // initiate the stk push
 const initiateStkPush = async (req, res, next) => {
-  const { phone, amount, billNumber, mpesaConfigId } = req.body;
+  const {
+    phone,
+    amount,
+    billNumber,
+    mpesaConfigId,
+    functionCode,
+    reservationNumber,
+  } = req.body;
   let PhoneNumber = cleanPhone(phone).substring(1);
 
-  console.log(`${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}`);
+  console.log(
+    `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
+  );
 
   // Validate bill number before initiating STK Push
   let billData;
   try {
     const validateResponse = await axios.get(
-      `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}`
+      `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
     );
 
     if (!validateResponse.data.success) {
       return res.status(400).json({
         success: false,
-        error: validateResponse.data.error || "Bill validation failed",
+        error:
+          validateResponse.data.error ||
+          `${
+            functionCode
+              ? "Function booking"
+              : reservationNumber
+              ? "Reservation"
+              : "Bill"
+          } validation failed`,
         code: validateResponse.data.code,
       });
     }
@@ -168,7 +185,13 @@ const initiateStkPush = async (req, res, next) => {
     console.log("Bill validated successfully:", billData);
   } catch (error) {
     console.log(
-      "Bill validation error:",
+      `${
+        functionCode
+          ? "Function booking"
+          : reservationNumber
+          ? "Reservation"
+          : "Bill"
+      } validation error:`,
       error.response?.data || error.message
     );
 
@@ -176,14 +199,28 @@ const initiateStkPush = async (req, res, next) => {
     if (error.response?.data) {
       return res.status(error.response.status || 400).json({
         success: false,
-        error: error.response.data.error || "Bill validation failed",
+        error:
+          error.response.data.error ||
+          `${
+            functionCode
+              ? "Function booking"
+              : reservationNumber
+              ? "Reservation"
+              : "Bill"
+          } validation failed`,
         code: error.response.data.code || "VALIDATION_ERROR",
       });
     }
 
     return res.status(400).json({
       success: false,
-      error: "Failed to validate bill. Please try again.",
+      error: `Failed to validate ${
+        functionCode
+          ? "function booking"
+          : reservationNumber
+          ? "reservation"
+          : "bill"
+      }. Please try again.`,
       code: "VALIDATION_ERROR",
     });
   }
