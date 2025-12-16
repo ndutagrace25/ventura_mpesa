@@ -274,8 +274,17 @@ const initiateStkPush = async (req, res, next) => {
   // Determine transaction type based on config type
   const transactionType = "CustomerPayBillOnline"; // For PayBill
 
-  // Build callback URL with billNumber and mpesaConfigId
-  let finalCallbackUrl = `${callbackUrl}/?billNumber=${billNumber}`;
+  // Build callback URL with the appropriate reference (billNumber, functionCode, or reservationNumber)
+  let finalCallbackUrl = callbackUrl;
+
+  if (functionCode) {
+    finalCallbackUrl += `?functionCode=${functionCode}`;
+  } else if (reservationNumber) {
+    finalCallbackUrl += `?reservationNumber=${reservationNumber}`;
+  } else if (billNumber) {
+    finalCallbackUrl += `?billNumber=${billNumber}`;
+  }
+
   if (effectiveConfigId) {
     finalCallbackUrl += `&mpesaConfigId=${effectiveConfigId}`;
   }
