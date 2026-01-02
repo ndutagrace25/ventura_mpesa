@@ -151,6 +151,7 @@ const initiateStkPush = async (req, res, next) => {
     mpesaConfigId,
     functionCode,
     reservationNumber,
+    billNumbers,
   } = req.body;
   let PhoneNumber = cleanPhone(phone).substring(1);
 
@@ -160,33 +161,73 @@ const initiateStkPush = async (req, res, next) => {
 
   // Validate bill number before initiating STK Push
   let billData;
+  let isMultipleBills = false;
+  let validBillNumbers = [];
+
   try {
-    const validateResponse = await axios.get(
-      `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
-    );
+    let validateResponse = null;
 
-    if (!validateResponse.data.success) {
-      return res.status(400).json({
-        success: false,
-        error:
-          validateResponse.data.error ||
-          `${
-            functionCode
-              ? "Function booking"
-              : reservationNumber
-              ? "Reservation"
-              : "Bill"
-          } validation failed`,
-        code: validateResponse.data.code,
-      });
+    if (billNumbers && Array.isArray(billNumbers) && billNumbers.length > 0) {
+      // Multiple bills validation
+      isMultipleBills = true;
+      validateResponse = await axios.post(
+        `${process.env.VALIDATE_MULTIPLE_BILLS_URL}`,
+        { billNumbers }
+      );
+
+      if (!validateResponse.data.success) {
+        return res.status(400).json({
+          success: false,
+          error:
+            validateResponse.data.message || "Some bills failed validation",
+          code: "MULTIPLE_BILLS_VALIDATION_FAILED",
+          results: validateResponse.data.results,
+        });
+      }
+
+      // Extract valid bill numbers for the callback URL
+      validBillNumbers = validateResponse.data.validBills.map(
+        (b) => b.billNumber
+      );
+      billData = {
+        totalAmount: validateResponse.data.summary.totalAmount,
+        mpesaConfigId: validateResponse.data.validBills[0]?.mpesaConfigId,
+      };
+      console.log(
+        "Multiple bills validated successfully:",
+        validateResponse.data.summary
+      );
+    } else {
+      // Single bill/function/reservation validation
+      validateResponse = await axios.get(
+        `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
+      );
+
+      if (!validateResponse.data.success) {
+        return res.status(400).json({
+          success: false,
+          error:
+            validateResponse.data.error ||
+            `${
+              functionCode
+                ? "Function booking"
+                : reservationNumber
+                ? "Reservation"
+                : "Bill"
+            } validation failed`,
+          code: validateResponse.data.code,
+        });
+      }
+
+      billData = validateResponse.data.data;
+      console.log("Bill validated successfully:", billData);
     }
-
-    billData = validateResponse.data.data;
-    console.log("Bill validated successfully:", billData);
   } catch (error) {
     console.log(
       `${
-        functionCode
+        isMultipleBills
+          ? "Multiple bills"
+          : functionCode
           ? "Function booking"
           : reservationNumber
           ? "Reservation"
@@ -202,7 +243,9 @@ const initiateStkPush = async (req, res, next) => {
         error:
           error.response.data.error ||
           `${
-            functionCode
+            isMultipleBills
+              ? "Multiple bills"
+              : functionCode
               ? "Function booking"
               : reservationNumber
               ? "Reservation"
@@ -215,7 +258,9 @@ const initiateStkPush = async (req, res, next) => {
     return res.status(400).json({
       success: false,
       error: `Failed to validate ${
-        functionCode
+        isMultipleBills
+          ? "bills"
+          : functionCode
           ? "function booking"
           : reservationNumber
           ? "reservation"
@@ -254,6 +299,8 @@ const initiateStkPush = async (req, res, next) => {
 
       // Generate token for this specific config
       req.mpesaToken = await generateAccessToken(config);
+
+      console.log(req.mpesaToken, "req.mpesaToken");
     } catch (configError) {
       console.error("Failed to fetch M-Pesa config:", configError.message);
       return res.status(500).json({
@@ -274,15 +321,23 @@ const initiateStkPush = async (req, res, next) => {
   // Determine transaction type based on config type
   const transactionType = "CustomerPayBillOnline"; // For PayBill
 
-  // Build callback URL with the appropriate reference (billNumber, functionCode, or reservationNumber)
+  // Build callback URL with the appropriate reference (billNumber, functionCode, reservationNumber, or billNumbers)
   let finalCallbackUrl = callbackUrl;
+  let accountReference;
 
-  if (functionCode) {
+  if (isMultipleBills && validBillNumbers.length > 0) {
+    // Multiple bills - pass as comma-separated billNumbers param
+    finalCallbackUrl += `?billNumbers=${validBillNumbers.join(",")}`;
+    accountReference = validBillNumbers.join(",");
+  } else if (functionCode) {
     finalCallbackUrl += `?functionCode=${functionCode}`;
+    accountReference = functionCode;
   } else if (reservationNumber) {
     finalCallbackUrl += `?reservationNumber=${reservationNumber}`;
+    accountReference = reservationNumber;
   } else if (billNumber) {
     finalCallbackUrl += `?billNumber=${billNumber}`;
+    accountReference = billNumber;
   }
 
   if (effectiveConfigId) {
@@ -291,6 +346,7 @@ const initiateStkPush = async (req, res, next) => {
 
   console.log("Initiating STK Push with config:", configName);
   console.log("Callback URL:", finalCallbackUrl);
+  console.log("Account Reference:", accountReference);
 
   // Bill is valid, proceed with STK Push
   await axios
@@ -308,8 +364,10 @@ const initiateStkPush = async (req, res, next) => {
         PartyB: partyB,
         PhoneNumber: PhoneNumber,
         CallBackURL: finalCallbackUrl,
-        AccountReference: billNumber,
-        TransactionDesc: "Bill Payment",
+        AccountReference: accountReference,
+        TransactionDesc: isMultipleBills
+          ? "Multiple Bills Payment"
+          : "Bill Payment",
       },
       {
         headers: {
@@ -322,6 +380,9 @@ const initiateStkPush = async (req, res, next) => {
         ...response.data,
         mpesaConfigId: effectiveConfigId,
         mpesaConfigName: configName,
+        isMultipleBills,
+        billCount: isMultipleBills ? validBillNumbers.length : 1,
+        billNumbers: isMultipleBills ? validBillNumbers : undefined,
       });
     })
     .catch((error) => {
