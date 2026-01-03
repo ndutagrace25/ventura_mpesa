@@ -3,25 +3,12 @@ const { cleanPhone } = require("../utils/cleanPhone");
 const generateTimestamp = require("../utils/generateTimestamp");
 require("dotenv").config();
 
-// Cache for M-Pesa configs to avoid repeated API calls
-const configCache = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
 /**
- * Fetch M-Pesa config from backend API
+ * Fetch M-Pesa config from backend API (no caching - configs rarely change)
  * @param {number|null} configId - Optional config ID, uses default if not provided
  * @returns {Promise<Object>} M-Pesa configuration with credentials
  */
 const fetchMpesaConfig = async (configId = null) => {
-  const cacheKey = configId ? `config_${configId}` : "config_default";
-  const cached = configCache.get(cacheKey);
-
-  // Return cached config if still valid
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log("Using cached M-Pesa config:", cacheKey);
-    return cached.data;
-  }
-
   try {
     const endpoint = configId
       ? `${process.env.BACKEND_URL}/api/internal/mpesa-config/${configId}`
@@ -40,14 +27,7 @@ const fetchMpesaConfig = async (configId = null) => {
     }
 
     const config = response.data.data;
-
-    // Cache the config
-    configCache.set(cacheKey, {
-      data: config,
-      timestamp: Date.now(),
-    });
-
-    console.log("Fetched M-Pesa config:", config.name);
+    console.log("Fetched M-Pesa config:", config.name, "type:", config.type);
     return config;
   } catch (error) {
     console.error(
@@ -82,6 +62,8 @@ const generateAccessToken = async (config) => {
       },
     });
 
+    console.log(access_token, "ACCESS TOKEN");
+
     return access_token;
   } catch (error) {
     console.error("Error generating access token:", error.message);
@@ -94,6 +76,8 @@ const generateToken = async (req, res, next) => {
   try {
     // Check if mpesaConfigId is provided, if so fetch config from backend
     const { mpesaConfigId } = req.body;
+
+    console.log(mpesaConfigId, "MPESA CONFIG ID");
 
     if (mpesaConfigId || process.env.BACKEND_URL) {
       // Use dynamic config from backend
@@ -132,7 +116,7 @@ const generateToken = async (req, res, next) => {
         Accept: "application/json",
       },
     });
-
+    console.log(access_token, "ACCESS TOKEN");
     req.mpesaToken = access_token;
     console.log("Using legacy M-Pesa config from env vars");
     next();
@@ -271,36 +255,55 @@ const initiateStkPush = async (req, res, next) => {
   }
 
   // Determine which M-Pesa config to use:
-  // 1. mpesaConfigId from request body
-  // 2. mpesaConfigId from bill data
-  // 3. Config fetched in middleware (req.mpesaConfig)
+  // 1. mpesaConfigId from bill data (takes precedence - bill knows which config to use)
+  // 2. mpesaConfigId from request body
+  // 3. Config fetched in middleware (req.mpesaConfig) - only if ID matches
   // 4. Default from env vars
-  const effectiveConfigId = mpesaConfigId || billData.mpesaConfigId;
+  const effectiveConfigId = billData.mpesaConfigId || mpesaConfigId;
+
+  console.log(
+    "Effective Config ID:",
+    effectiveConfigId,
+    "| Middleware Config ID:",
+    req.mpesaConfig?.id
+  );
 
   // Get M-Pesa config and credentials
-  let shortcode, passkey, partyB, callbackUrl, configName;
+  let shortcode, passkey, partyB, callbackUrl, configName, configType;
 
-  if (req.mpesaConfig) {
-    // Use config from middleware
+  // Use middleware config ONLY if its ID matches the effective config ID
+  // Otherwise, fetch the correct config based on effectiveConfigId
+  if (req.mpesaConfig && req.mpesaConfig.id === effectiveConfigId) {
+    // Use config from middleware (IDs match)
     shortcode = req.mpesaConfig.shortcode;
     passkey = req.mpesaConfig.passkey;
     partyB = req.mpesaConfig.partyB;
     callbackUrl = req.mpesaConfig.callbackUrl || process.env.CALLBACK;
     configName = req.mpesaConfig.name;
+    configType = req.mpesaConfig.type; // 'paybill' or 'till'
+    console.log("Using middleware config (ID matched):", configName);
   } else if (effectiveConfigId) {
-    // Fetch specific config
+    // Fetch the specific config for this payment
     try {
       const config = await fetchMpesaConfig(effectiveConfigId);
+
+      console.log(
+        "Fetched specific config:",
+        config.name,
+        "ID:",
+        config.id,
+        "Type:",
+        config.type
+      );
       shortcode = config.shortcode;
       passkey = config.passkey;
       partyB = config.partyB;
       callbackUrl = config.callbackUrl || process.env.CALLBACK;
       configName = config.name;
+      configType = config.type; // 'paybill' or 'till'
 
       // Generate token for this specific config
       req.mpesaToken = await generateAccessToken(config);
-
-      console.log(req.mpesaToken, "req.mpesaToken");
     } catch (configError) {
       console.error("Failed to fetch M-Pesa config:", configError.message);
       return res.status(500).json({
@@ -309,6 +312,15 @@ const initiateStkPush = async (req, res, next) => {
         code: "CONFIG_ERROR",
       });
     }
+  } else if (req.mpesaConfig) {
+    // No specific config ID, use whatever middleware fetched (default)
+    shortcode = req.mpesaConfig.shortcode;
+    passkey = req.mpesaConfig.passkey;
+    partyB = req.mpesaConfig.partyB;
+    callbackUrl = req.mpesaConfig.callbackUrl || process.env.CALLBACK;
+    configName = req.mpesaConfig.name;
+    configType = req.mpesaConfig.type;
+    console.log("Using middleware default config:", configName);
   } else {
     // Use env vars (legacy)
     shortcode = process.env.SHORTCODE;
@@ -316,10 +328,21 @@ const initiateStkPush = async (req, res, next) => {
     partyB = process.env.PARTYB;
     callbackUrl = process.env.CALLBACK;
     configName = "Legacy (env vars)";
+    configType = "paybill"; // Legacy defaults to paybill
+    console.log("Using legacy env vars config");
   }
 
   // Determine transaction type based on config type
-  const transactionType = "CustomerPayBillOnline"; // For PayBill
+  // PayBill uses "CustomerPayBillOnline", Till uses "CustomerBuyGoodsOnline"
+  const transactionType =
+    configType === "till" ? "CustomerBuyGoodsOnline" : "CustomerPayBillOnline";
+
+  console.log(
+    "Using transaction type:",
+    transactionType,
+    "for config type:",
+    configType
+  );
 
   // Build callback URL with the appropriate reference (billNumber, functionCode, reservationNumber, or billNumbers)
   let finalCallbackUrl = callbackUrl;
@@ -395,18 +418,9 @@ const validate = (req, res) => {
   return res.status(200).json("success");
 };
 
-/**
- * Clear the config cache (useful for testing or when configs are updated)
- */
-const clearConfigCache = () => {
-  configCache.clear();
-  console.log("M-Pesa config cache cleared");
-};
-
 module.exports = {
   initiateStkPush,
   generateToken,
   validate,
   fetchMpesaConfig,
-  clearConfigCache,
 };
