@@ -136,11 +136,12 @@ const initiateStkPush = async (req, res, next) => {
     functionCode,
     reservationNumber,
     billNumbers,
+    computerId,
   } = req.body;
   let PhoneNumber = cleanPhone(phone).substring(1);
 
   console.log(
-    `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
+    `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}&computerId=${computerId}`
   );
 
   // Validate bill number before initiating STK Push
@@ -156,7 +157,7 @@ const initiateStkPush = async (req, res, next) => {
       isMultipleBills = true;
       validateResponse = await axios.post(
         `${process.env.VALIDATE_MULTIPLE_BILLS_URL}`,
-        { billNumbers }
+        { billNumbers, computerId }
       );
 
       if (!validateResponse.data.success) {
@@ -184,7 +185,7 @@ const initiateStkPush = async (req, res, next) => {
     } else {
       // Single bill/function/reservation validation
       validateResponse = await axios.get(
-        `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}`
+        `${process.env.VALIDATE_BILL_URL}?billNumber=${billNumber}&functionCode=${functionCode}&reservationNumber=${reservationNumber}&computerId=${computerId}`
       );
 
       if (!validateResponse.data.success) {
@@ -255,13 +256,13 @@ const initiateStkPush = async (req, res, next) => {
   }
 
   // Determine which M-Pesa config to use:
-  // 1. mpesaConfigId from request body - the computer initiating this STK
-  //    push is the source of truth for which till to charge, resolved fresh
-  //    by the caller from the initiating computer's store location.
-  // 2. mpesaConfigId from bill data (fallback if the caller didn't resolve one)
+  // 1. mpesaConfigId from bill data - the backend resolves this from the
+  //    initiating computer's own store/till (via computerId, forwarded to
+  //    the validate-bill call above), so it's the source of truth here.
+  // 2. mpesaConfigId from request body (fallback if validation didn't return one)
   // 3. Config fetched in middleware (req.mpesaConfig) - only if ID matches
   // 4. Default from env vars
-  const effectiveConfigId = mpesaConfigId || billData.mpesaConfigId;
+  const effectiveConfigId = billData.mpesaConfigId || mpesaConfigId;
 
   console.log(
     "Effective Config ID:",
