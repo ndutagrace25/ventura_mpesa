@@ -255,11 +255,13 @@ const initiateStkPush = async (req, res, next) => {
   }
 
   // Determine which M-Pesa config to use:
-  // 1. mpesaConfigId from bill data (takes precedence - bill knows which config to use)
-  // 2. mpesaConfigId from request body
+  // 1. mpesaConfigId from request body - the computer initiating this STK
+  //    push is the source of truth for which till to charge, resolved fresh
+  //    by the caller from the initiating computer's store location.
+  // 2. mpesaConfigId from bill data (fallback if the caller didn't resolve one)
   // 3. Config fetched in middleware (req.mpesaConfig) - only if ID matches
   // 4. Default from env vars
-  const effectiveConfigId = billData.mpesaConfigId || mpesaConfigId;
+  const effectiveConfigId = mpesaConfigId || billData.mpesaConfigId;
 
   console.log(
     "Effective Config ID:",
